@@ -12,6 +12,8 @@ each is unambiguous.
 
   python train/train_char_v2.py --prep runs/train/dual_r32_prep --config configs/train_char_v2.json \
       --out runs/train/char_v2
+  # continue (same or larger --steps) from the newest state saved with the checkpoints
+  python train/train_char_v2.py ... --out runs/train/char_v2 --resume runs/train/char_v2/state_step01500.pt
 """
 from __future__ import annotations
 
@@ -98,7 +100,8 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--comfy-root", default="/workspace/ComfyUI")
     parser.add_argument("--init-lora", type=Path, help="start from a reference adapter LoRA (its character slot)")
-    parser.add_argument("--steps", type=int)
+    parser.add_argument("--steps", type=int, help="total steps (on --resume: a new total; the lr schedule follows it)")
+    parser.add_argument("--resume", type=Path, help="state_stepNNNNN.pt written next to the checkpoints")
     parser.add_argument("--no-sample", action="store_true")
     args = parser.parse_args()
 
@@ -134,6 +137,17 @@ def main() -> int:
                                   lr=train_cfg["lr"], betas=(0.9, 0.999), weight_decay=train_cfg["weight_decay"])
     print(f"lora modules={len(modules)} params={sum(p.numel() for p in params) / 1e6:.1f}M "
           f"style embed dim={embed.numel()}", flush=True)
+    state = None
+    if args.resume:
+        state = torch.load(args.resume, map_location="cpu", weights_only=False)
+        with torch.no_grad():
+            for name, module in modules.items():
+                module.lora_down.copy_(state["lora"][name][0])
+                module.lora_up.copy_(state["lora"][name][1])
+            embed.copy_(state["embed"])
+        optimizer.load_state_dict(state["optimizer"])
+        print(f"resumed from {args.resume} (step {state['step']})", flush=True)
+    start_step = state["step"] if state else 0
 
     lf = anima_env.latent_format()
 
@@ -146,6 +160,12 @@ def main() -> int:
     sampler = PairSampler(prep, v2_cfg["modes"], train_cfg["batch_size"], seed)
     print(f"targets per mode: {sampler.counts()}", flush=True)
     rng = random.Random(seed + 1)
+    if state:  # continue the exact data order and randomness
+        sampler.rng.setstate(state["sampler_rng"])
+        sampler.queues = state["sampler_queues"]
+        rng.setstate(state["rng"])
+        torch.set_rng_state(state["torch_rng"])
+        torch.cuda.set_rng_state(state["cuda_rng"])
     vae = anima_env.load_vae(config["comfy"]["vae_name"])
     fill = int(config["data"].get("letterbox_fill", 255))
 
@@ -177,10 +197,24 @@ def main() -> int:
             image_rows(dm, prep, refs, embed.detach(), vae, out_dir, config, device)
         print(f"eval at step {step} took {time.perf_counter() - t0:.0f}s", flush=True)
 
-    if args.init_lora and not args.no_sample:
+    def save_state(step: int) -> None:
+        """Everything needed to continue bit-for-bit: LoRA, embed, optimizer moments, data order, RNGs.
+        Only the newest state is kept (~0.6 GB)."""
+        path = args.out / f"state_step{step:05d}.pt"
+        torch.save({"step": step, "embed": embed.detach().cpu(), "optimizer": optimizer.state_dict(),
+                    "lora": {n: (m.lora_down.detach().cpu(), m.lora_up.detach().cpu()) for n, m in modules.items()},
+                    "sampler_rng": sampler.rng.getstate(), "sampler_queues": sampler.queues, "rng": rng.getstate(),
+                    "torch_rng": torch.get_rng_state(), "cuda_rng": torch.cuda.get_rng_state()},
+                   path.with_suffix(".tmp"))
+        path.with_suffix(".tmp").replace(path)
+        for old in args.out.glob("state_step*.pt"):
+            if old != path:
+                old.unlink()
+
+    if args.init_lora and not state and not args.no_sample:
         evaluate(0, images=False)  # the starting point (from scratch every gap is 0)
     started = window_start = time.perf_counter()
-    for step in range(train_cfg["steps"]):
+    for step in range(start_step, train_cfg["steps"]):
         mode, (width, height), batch = sampler.next()
         x0 = torch.stack([targets[t] for t, _ in batch]).to(device)
         ref_list = []
@@ -236,6 +270,7 @@ def main() -> int:
         if done % train_cfg["save_every"] == 0 or done == train_cfg["steps"]:
             anima_env.save_lora(modules, args.out / f"lora_step{done:05d}.safetensors", {**metadata, "step": done},
                                 extra={anima_env.STYLE_EMBED_KEY: embed})
+            save_state(done)
         if done in sample_at and not args.no_sample:
             evaluate(done, images=True)
             window_start = time.perf_counter()
