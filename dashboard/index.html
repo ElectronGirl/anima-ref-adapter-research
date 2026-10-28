@@ -69,7 +69,8 @@
 <script>
 const BASELINE = { identity_s0: 0.001974, leak_s0: 0.000257, copy_s0: 0.000595, copy_s1: 0.000595 };
 const GAP_LABELS = { identity_s0: "정체성 차이 (s=0)", leak_s0: "그림체 새어 들어감 (s=0)", copy_s0: "그림체 복사 (s=0)",
-                     copy_s1: "그림체 복사 (s=1)", knob: "변수 효과 (s1−s0)" };
+                     copy_s1: "그림체 복사 (s=1)", knob: "변수 효과 (s1−s0)",
+                     blend_vs_s0: "블렌드: 맞는 s vs s=0", blend_vs_s1: "블렌드: 맞는 s vs s=1", ref_wins: "충돌: s=1이 레퍼런스 따름" };
 const IMAGE_NOTES = {
   v2: "한 줄: 레퍼런스 | s=0 + 목표 작가 태그 | s=1 장면 프롬프트 | s=0.5 장면 프롬프트 | 생성기 목표",
   dual: "한 줄: 캐릭터 레퍼런스 | 스타일 레퍼런스 | 두 슬롯 | 캐릭터 슬롯만 | 스타일 슬롯만 | 생성기 목표" };
@@ -134,9 +135,9 @@ function render() {
   document.getElementById("gapsCard").style.display = evals.length ? "" : "none";
   document.getElementById("tableCard").style.display = evals.length ? "" : "none";
   if (evals.length) {
-    const keys = Object.keys(GAP_LABELS);
-    const sets = keys.map((k, i) => ({ label: GAP_LABELS[k], data: evals.map(e => ({ x: e.eval_step, y: e.gaps[k] })),
-      borderColor: col[i], backgroundColor: col[i], pointRadius: 4, borderWidth: 2 }));
+    const keys = Object.keys(GAP_LABELS).filter(k => evals.some(e => e.gaps[k] != null));
+    const sets = keys.map((k, i) => ({ label: GAP_LABELS[k], data: evals.filter(e => e.gaps[k] != null).map(e => ({ x: e.eval_step, y: e.gaps[k] })),
+      borderColor: col[i % col.length], backgroundColor: col[i % col.length], pointRadius: 4, borderWidth: 2 }));
     keys.filter(k => k in BASELINE && k !== "copy_s1").forEach(k => {
       const i = keys.indexOf(k), xs = evals.map(e => e.eval_step), lo = Math.min(0, ...xs), hi = Math.max(...xs, run.steps || 0);
       sets.push({ label: GAP_LABELS[k] + " · dual", data: [{ x: lo, y: BASELINE[k] }, { x: hi, y: BASELINE[k] }],
@@ -146,7 +147,7 @@ function render() {
       plugins: { legend: { labels: { color: css("--text"), boxWidth: 12, filter: it => !it.text.endsWith("· dual") } } } }) });
     const head = `<tr><th>step</th>${keys.map(k => `<th>${GAP_LABELS[k]}</th>`).join("")}</tr>`;
     const base = `<tr><td>dual 출발점</td>${keys.map(k => `<td>${k in BASELINE ? BASELINE[k].toFixed(5) : "0"}</td>`).join("")}</tr>`;
-    const rows = evals.map(e => `<tr><td>${e.eval_step}</td>${keys.map(k => `<td>${e.gaps[k].toFixed(5)}</td>`).join("")}</tr>`).join("");
+    const rows = evals.map(e => `<tr><td>${e.eval_step}</td>${keys.map(k => `<td>${e.gaps[k] == null ? "–" : e.gaps[k].toFixed(5)}</td>`).join("")}</tr>`).join("");
     document.getElementById("table").innerHTML = `<table>${head}${base}${rows}</table>`;
   }
 

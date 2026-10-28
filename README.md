@@ -28,8 +28,10 @@ prompt omits what the reference should supply (character, appearance, outfit, ar
 |---|---|---|
 | `pilot_r32` | one reference → identity (+ some style) | released; 3,600 images, 2,000 steps |
 | `dual_r32` | character slot + style slot | trained (15,600 images, 4,000 steps); character slot better than pilot, **style slot does not work** |
-| `char_v2` | one reference + `style_transfer` strength (0 = identity only, 1 = identity and style) | **training** (from scratch, 3,000 steps) |
-| style adapter | style only, from another character's image | planned |
+| `char_v2` / `char_v3` | one reference + `style_transfer` strength (0 = identity only, 1 = identity and style) | stopped: the strength was ignored |
+| character-only adapter | identity from the reference, style from artist tags; 0.56–1.27 MP | **next** |
+| character + style adapter | identity and style from the reference | `pilot_r32`; may be retrained |
+| style-only adapter | style only, from another character's image | planned |
 
 See [docs/experiments.md](docs/experiments.md) for the setups, held-out metrics, what went wrong with
 the style slot and why.

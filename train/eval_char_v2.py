@@ -131,6 +131,113 @@ def image_rows(dm, prep: Prep, refs: dict, embed: torch.Tensor, vae, out_dir: Pa
         sheet.save(out_dir / "contact_sheet.jpg", quality=85)
 
 
+class BlendPrep:
+    """prepare_blend.py output with its latents converted by `convert` (raw VAE -> model space)."""
+
+    def __init__(self, path: Path, convert):
+        from safetensors.torch import load_file
+        self.dir = Path(path)
+        self.index = json.loads((self.dir / "index.json").read_text(encoding="utf-8"))
+        ctx = load_file(str(self.dir / "contexts.safetensors"))
+        self._data, self._offsets = ctx["data"], ctx["offsets"].tolist()
+        self.targets, self.refs = {}, {}
+        for kind, out in (("targets", self.targets), ("refs", self.refs)):
+            for name in self.index["files"][kind]:
+                raw = load_file(str(self.dir / name))
+                out.update({k: convert(raw.pop(k)) for k in list(raw)})
+
+    def context(self, i: int) -> torch.Tensor:
+        return self._data[self._offsets[i]:self._offsets[i + 1]]
+
+    def image(self, record_id: str) -> Image.Image:
+        return Image.open(Path(self.index["data_dir"]) / self.index["records"][record_id]["image"]).convert("RGB")
+
+
+@torch.inference_mode()
+def blend_gaps(dm, prep: Prep, bprep: BlendPrep, refs: dict, targets: dict, embed: torch.Tensor, config: dict,
+               device, limit: int = 60) -> dict:
+    """Held-out blend targets at the right strength vs the ends, and conflict targets at s=1 vs s=0
+    (prompt naming B, reference from (C, A)). Positive = the knob is used the right way:
+      blend_vs_s0 / blend_vs_s1  loss at s=0 (or 1) - loss at the record's own s
+      ref_wins                   conflict target: loss at s=0 - loss at s=1
+    """
+    adapter_cfg, groups = config["adapter"], prep.index["groups"]
+    sigma = torch.tensor(SIGMAS, device=device)
+    s_ = sigma.view(-1, 1, 1, 1, 1)
+    n = len(SIGMAS)
+
+    def losses(x0_raw, ref_raw, ctx, strengths, seed):
+        x0 = x0_raw[None].to(device).float().expand(n, -1, -1, -1, -1)
+        noise = torch.randn(x0.shape, generator=torch.Generator().manual_seed(seed), dtype=torch.float32).to(device)
+        xt = ((1 - s_) * x0 + s_ * noise).to(torch.bfloat16)
+        context = anima_env.pad_contexts([ctx] * n).to(device, torch.bfloat16)
+        ref = ref_raw[None].to(device).expand(n, -1, -1, -1, -1)
+        frames = anima_env.slot_frames({"character": ref}, x0.shape[-2], adapter_cfg)
+        out = []
+        for strength in strengths:
+            bias = (strength * embed.to(device)).reshape(1, -1).expand(n, -1)
+            pred = anima_env.ref_forward(dm, xt, sigma, context, refs=frames, ref_bias=bias).float()
+            out.append(((pred - (noise - x0)) ** 2).mean().item())
+        return out
+
+    fit0, fit1, wins = [], [], []
+    held = [rid for rid, r in bprep.index["records"].items() if r["split"] == "eval"][:limit]
+    for i, rid in enumerate(held):
+        rec = bprep.index["records"][rid]
+        ref_key = f"{groups[rec['ref_group']]['record_ids'][0]}@{rec['width']}x{rec['height']}"
+        l0, ls, l1 = losses(bprep.targets[rid], bprep.refs[ref_key], bprep.context(rec["prompts"]["text_artist"]),
+                            (0.0, rec["s"], 1.0), 1000 + i)
+        fit0.append(l0 - ls)
+        fit1.append(l1 - ls)
+    conflicts = [c for c in bprep.index["conflicts"] if c["split"] == "eval"][:limit]
+    for i, item in enumerate(conflicts):
+        target = prep.record(item["target"])
+        others = [r for r in groups[item["ref_group"]]["record_ids"] if r != item["target"]]
+        if not others:
+            continue
+        l0, l1 = losses(targets[item["target"]], refs[f"{others[0]}@{target['width']}x{target['height']}"],
+                        bprep.context(item["prompt"]), (0.0, 1.0), 2000 + i)
+        wins.append(l0 - l1)
+    mean = lambda v: round(sum(v) / len(v), 6) if v else None  # noqa: E731
+    return {"blend_vs_s0": mean(fit0), "blend_vs_s1": mean(fit1), "ref_wins": mean(wins),
+            "blend_cases": len(fit0), "conflict_cases": len(wins)}
+
+
+@torch.inference_mode()
+def blend_rows(dm, prep: Prep, bprep: BlendPrep, embed: torch.Tensor, vae, out_dir: Path, config: dict, device) -> None:
+    """Held-out blend cases: reference (C, A) | an image of (C, B) | s = 0 / 0.5 / 1 with the prompt naming B |
+    the generated blend at the record's own s."""
+    lf = anima_env.latent_format()
+    sample_cfg, groups = config["sample"], prep.index["groups"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for k, rid in enumerate(bprep.index["eval_cases"]):
+        rec = bprep.index["records"][rid]
+        ref_id = groups[rec["ref_group"]]["record_ids"][0]
+        shape = (1, 16, 1, rec["height"] // 8, rec["width"] // 8)
+        ref = bprep.refs[f"{ref_id}@{rec['width']}x{rec['height']}"][None].to(device)
+        frames = anima_env.slot_frames({"character": ref}, shape[-2], config["adapter"])
+        ctx, neg = bprep.context(rec["prompts"]["text_artist"]), bprep.context(rec["prompts"]["negative"])
+        panels = [("reference (C, A)", prep.image(ref_id)),
+                  ("prompt artist (C, B)", prep.image(groups[rec["text_group"]]["record_ids"][0]))]
+        for strength in (0.0, 0.5, 1.0):
+            x = anima_env.sample_euler(dm, ctx, neg, shape, 777 + k, sample_cfg["steps"], sample_cfg["cfg"],
+                                       config["train"]["shift"], device, frames=frames, ref_bias=strength * embed)
+            panels.append((f"s={strength}, prompt names B", to_pil(anima_env.vae_decode(vae, lf.process_out(x.to(device)).float())[0])))
+        panels.append((f"generated blend target (s={rec['s']})", bprep.image(rid)))
+        row = labeled_row(panels)
+        row.save(out_dir / f"blend_{rid}.jpg", quality=90)
+        rows.append(row)
+        print(f"blend sample {rid} done", flush=True)
+    if rows:
+        sheet = Image.new("RGB", (max(r.width for r in rows), sum(r.height for r in rows)), "white")
+        y = 0
+        for row in rows:
+            sheet.paste(row, (0, y))
+            y += row.height
+        sheet.save(out_dir / "blend_sheet.jpg", quality=85)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--prep", type=Path, required=True)
@@ -139,6 +246,7 @@ def main() -> int:
     parser.add_argument("--no-images", action="store_true")
     parser.add_argument("--max-groups", type=int, default=60, help="held-out groups for the loss gaps")
     parser.add_argument("--max-cases", type=int, help="eval cases for the images (default: all)")
+    parser.add_argument("--blend-prep", type=Path, help="prepare_blend.py output: adds the blend gaps and rows")
     parser.add_argument("--comfy-root", default="/workspace/ComfyUI")
     args = parser.parse_args()
     prep = Prep(args.prep)
@@ -157,11 +265,16 @@ def main() -> int:
     targets = {k: convert(prep.targets.pop(k)) for k in list(prep.targets)}
     args.out.mkdir(parents=True, exist_ok=True)
     result = loss_gaps(dm, prep, refs, targets, embed, config, device, limit=args.max_groups)
+    bprep = BlendPrep(args.blend_prep, convert) if args.blend_prep else None
+    if bprep:
+        result["gaps"].update(blend_gaps(dm, prep, bprep, refs, targets, embed, config, device, limit=args.max_groups))
     print(json.dumps(result), flush=True)
     (args.out / "loss_gaps.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
     if not args.no_images:
-        image_rows(dm, prep, refs, embed, anima_env.load_vae(config["comfy"]["vae_name"]), args.out, config, device,
-                   limit=args.max_cases)
+        vae = anima_env.load_vae(config["comfy"]["vae_name"])
+        image_rows(dm, prep, refs, embed, vae, args.out, config, device, limit=args.max_cases)
+        if bprep:
+            blend_rows(dm, prep, bprep, embed, vae, args.out, config, device)
     return 0
 
 

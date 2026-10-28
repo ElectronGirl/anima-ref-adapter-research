@@ -7,11 +7,20 @@ step draws one mode for the whole batch:
                   fine detail scrambled (downsample/blur/tone jitter), so its style is unusable
   copy     (s=1)  reference = another image of the target's group (same character, same artist);
                   the prompt has no artist, so the style must come from the reference
-Without the knob the two modes contradict each other (copy the reference's style or not); with it,
-each is unambiguous.
+  blend  (s=0.25/0.5/0.75, with --blend-prep)  target = the character drawn with the reference's
+                  artists A scaled by s and the prompt's artists B by 1 - s (prepare_blend.py); the
+                  reference is from (C, A), the prompt names B
+  conflict (s=1, with --blend-prep)  target from (C, A), reference another (C, A) image, prompt names
+                  B: at full strength the reference's style wins over the prompt's artist
+Without the knob the modes contradict each other (copy the reference's style or not); with it, each
+is unambiguous, and with the blend targets s is "how much of the reference's style versus the
+prompt's artist". Without the blend modes the prompt alone (artist tags or not) tells identity from
+copy, and the knob goes unused (char_v2 run at step 1000).
 
   python train/train_char_v2.py --prep runs/train/dual_r32_prep --config configs/train_char_v2.json \
       --out runs/train/char_v2
+  python train/train_char_v2.py --prep runs/train/dual_r32_prep --blend-prep runs/train/blend1_prep \
+      --config configs/train_char_v3.json --out runs/train/char_v3
   # continue (same or larger --steps) from the newest state saved with the checkpoints
   python train/train_char_v2.py ... --out runs/train/char_v2 --resume runs/train/char_v2/state_step01500.pt
 """
@@ -19,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -31,11 +41,11 @@ from PIL import Image, ImageEnhance, ImageFilter
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import anima_env  # noqa: E402
-from eval_char_v2 import image_rows, loss_gaps  # noqa: E402
+from eval_char_v2 import BlendPrep, blend_gaps, blend_rows, image_rows, loss_gaps  # noqa: E402
 from sample import Prep  # noqa: E402
 from train import lr_at  # noqa: E402
 
-STRENGTH = {"identity": 0.0, "copy": 1.0}
+STRENGTH = {"identity": 0.0, "copy": 1.0, "conflict": 1.0}  # blend: each record's own s
 
 
 def scramble_style(image: Image.Image, rng: random.Random) -> Image.Image:
@@ -54,11 +64,12 @@ def scramble_style(image: Image.Image, rng: random.Random) -> Image.Image:
 class PairSampler:
     """Per step: a mode, then a target-size bucket of targets that support it, then one reference each."""
 
-    def __init__(self, prep: Prep, modes: dict[str, float], batch_size: int, seed: int):
+    def __init__(self, prep: Prep, modes: dict[str, float], batch_size: int, seed: int, blend: dict | None = None):
+        """Targets are base record ids, "b:<blend record id>" or "k:<conflict index>"; refs are record ids."""
         self.rng = random.Random(seed)
-        self.modes, self.batch_size = modes, batch_size
+        self.batch_size = batch_size
         records, groups = prep.index["records"], prep.index["groups"]
-        self.candidates, buckets = {}, defaultdict(list)
+        self.candidates, buckets = defaultdict(dict), defaultdict(list)
         for group in groups.values():
             if group["split"] != "train":
                 continue
@@ -67,10 +78,22 @@ class PairSampler:
                 same = [r for r in group["record_ids"] if r != target]
                 self.candidates[target] = {"identity": char_refs, "copy": same}
                 size = (records[target]["width"], records[target]["height"])
-                for mode in modes:
-                    if self.candidates[target][mode]:
+                for mode in ("identity", "copy"):
+                    if mode in modes and self.candidates[target][mode]:
                         buckets[(mode, size)].append(target)
+        if blend:
+            for rid, rec in blend["records"].items():
+                if rec["split"] == "train":
+                    self.candidates[f"b:{rid}"]["blend"] = groups[rec["ref_group"]]["record_ids"]
+                    buckets[("blend", (rec["width"], rec["height"]))].append(f"b:{rid}")
+            for i, item in enumerate(blend["conflicts"]):
+                refs = [r for r in groups[item["ref_group"]]["record_ids"] if r != item["target"]]
+                if item["split"] == "train" and refs:
+                    self.candidates[f"k:{i}"]["conflict"] = refs
+                    target = records[item["target"]]
+                    buckets[("conflict", (target["width"], target["height"]))].append(f"k:{i}")
         self.buckets = dict(buckets)
+        self.modes = {m: w for m, w in modes.items() if any(k[0] == m for k in self.buckets)}
         self.queues = {key: [] for key in self.buckets}
 
     def counts(self) -> dict[str, int]:
@@ -102,6 +125,7 @@ def main() -> int:
     parser.add_argument("--init-lora", type=Path, help="start from a reference adapter LoRA (its character slot)")
     parser.add_argument("--steps", type=int, help="total steps (on --resume: a new total; the lr schedule follows it)")
     parser.add_argument("--resume", type=Path, help="state_stepNNNNN.pt written next to the checkpoints")
+    parser.add_argument("--blend-prep", type=Path, help="prepare_blend.py output: adds the blend and conflict modes")
     parser.add_argument("--no-sample", action="store_true")
     args = parser.parse_args()
 
@@ -112,6 +136,7 @@ def main() -> int:
         train_cfg["steps"] = args.steps
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=1), encoding="utf-8")
+    (args.out / "train.pid").write_text(str(os.getpid()))  # read by dashboard/server.py
 
     seed = train_cfg["seed"]
     random.seed(seed)
@@ -157,7 +182,8 @@ def main() -> int:
     targets = {k: model_space(prep.targets.pop(k)) for k in list(prep.targets)}
     refs = {k: model_space(prep.refs.pop(k)) for k in list(prep.refs)}
     records = prep.index["records"]
-    sampler = PairSampler(prep, v2_cfg["modes"], train_cfg["batch_size"], seed)
+    bprep = BlendPrep(args.blend_prep, model_space) if args.blend_prep else None
+    sampler = PairSampler(prep, v2_cfg["modes"], train_cfg["batch_size"], seed, bprep.index if bprep else None)
     print(f"targets per mode: {sampler.counts()}", flush=True)
     rng = random.Random(seed + 1)
     if state:  # continue the exact data order and randomness
@@ -188,6 +214,8 @@ def main() -> int:
         out_dir = args.out / "samples" / f"step{step:05d}"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = loss_gaps(dm, prep, refs, targets, embed.detach(), config, device)
+        if bprep:
+            result["gaps"].update(blend_gaps(dm, prep, bprep, refs, targets, embed.detach(), config, device))
         result["step"] = step
         (out_dir / "loss_gaps.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
         print(json.dumps({"eval_step": step, **result["gaps"]}), flush=True)
@@ -195,6 +223,8 @@ def main() -> int:
             handle.write(json.dumps({"eval_step": step, **result}) + "\n")
         if images:
             image_rows(dm, prep, refs, embed.detach(), vae, out_dir, config, device)
+            if bprep:
+                blend_rows(dm, prep, bprep, embed.detach(), vae, out_dir, config, device)
         print(f"eval at step {step} took {time.perf_counter() - t0:.0f}s", flush=True)
 
     def save_state(step: int) -> None:
@@ -216,19 +246,32 @@ def main() -> int:
     started = window_start = time.perf_counter()
     for step in range(start_step, train_cfg["steps"]):
         mode, (width, height), batch = sampler.next()
-        x0 = torch.stack([targets[t] for t, _ in batch]).to(device)
-        ref_list = []
-        for _, r in batch:
-            if mode == "identity" and rng.random() < v2_cfg["aug_prob"]:
-                ref_list.append(scrambled_ref(r, width, height))
-            else:
-                ref_list.append(refs[f"{r}@{width}x{height}"])
-        ref = torch.stack(ref_list).to(device)
         mix = config["data"]["prompt_mix"]
-        keys = ["with_artist" if mode == "identity" else rng.choices(list(mix), weights=list(mix.values()))[0]
-                for _ in batch]
-        context = anima_env.pad_contexts([prep.context(records[t]["prompts"][k]) for (t, _), k in zip(batch, keys)])
-        context = context.to(device, torch.bfloat16)
+        x0_list, ref_list, ctx_list, strengths = [], [], [], []
+        for t, r in batch:
+            key = f"{r}@{width}x{height}"
+            if mode == "blend":
+                rec = bprep.index["records"][t[2:]]
+                x0_list.append(bprep.targets[t[2:]])
+                ref_list.append(bprep.refs[key])
+                ctx_list.append(bprep.context(rec["prompts"]["text_artist"]))
+                strengths.append(rec["s"])
+                continue
+            if mode == "conflict":
+                item = bprep.index["conflicts"][int(t[2:])]
+                x0_list.append(targets[item["target"]])
+                ref_list.append(refs[key])
+                ctx_list.append(bprep.context(item["prompt"]))
+            else:
+                x0_list.append(targets[t])
+                use_scrambled = mode == "identity" and rng.random() < v2_cfg["aug_prob"]
+                ref_list.append(scrambled_ref(r, width, height) if use_scrambled else refs[key])
+                prompt = "with_artist" if mode == "identity" else rng.choices(list(mix), weights=list(mix.values()))[0]
+                ctx_list.append(prep.context(records[t]["prompts"][prompt]))
+            strengths.append(STRENGTH[mode])
+        x0 = torch.stack(x0_list).to(device)
+        ref = torch.stack(ref_list).to(device)
+        context = anima_env.pad_contexts(ctx_list).to(device, torch.bfloat16)
 
         u = torch.rand(len(batch), device=device)
         sigma = (shift * u / (1 + (shift - 1) * u)).clamp(1e-3, 1.0)
@@ -238,7 +281,7 @@ def main() -> int:
         target_v = noise - x0.float()
         jitter = [rng.randint(0, adapter_cfg["ref_offset_jitter"]), 0]
         frames = anima_env.slot_frames({"character": ref}, x0.shape[-2], adapter_cfg, jitter)
-        bias = (STRENGTH[mode] * embed).reshape(1, -1).expand(len(batch), -1)
+        bias = torch.tensor(strengths, device=device)[:, None] * embed[None, :]
 
         for group in optimizer.param_groups:
             group["lr"] = lr_at(step, train_cfg) * group["lr_scale"]

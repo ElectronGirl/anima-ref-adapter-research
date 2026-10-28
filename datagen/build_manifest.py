@@ -22,8 +22,6 @@ import re
 import sys
 from pathlib import Path
 
-import polars as pl
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import vocab  # noqa: E402
 from catalog import anima_tag, load_artists, load_characters, load_name_set  # noqa: E402
@@ -130,6 +128,7 @@ def scene_tags(scene: dict) -> list[str]:
 
 
 def build(config: dict) -> tuple[list[dict], list[dict]]:
+    import polars as pl  # only here, so the helpers import without it (build_blend_manifest.py)
     rng = random.Random(config["seed"])
     validate_scene_vocab(set(pl.read_parquet(ROOT / config["tag_taxonomy"], columns=["tag"])["tag"].to_list()))
     chars = eligible_characters(config["characters"])

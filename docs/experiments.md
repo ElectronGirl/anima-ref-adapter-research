@@ -98,9 +98,54 @@ Evaluated at steps 1,000 / 2,000 / 3,000 with `eval_char_v2.py` gaps:
 
 Reference point (`dual_r32` with s ignored): identity 0.00197, leak 0.00026, copy 0.00060, knob 0.
 
-Results will be added here.
+**Result (stopped at step 1,300).** At step 1,000: identity 0.00222 (better than dual), leak 0.00037,
+copy_s0 0.00086, copy_s1 0.00089, **knob 0.00003**. Images: s = 0 with the target's artist tags follows
+those tags clearly and keeps the identity (much better than `dual_r32`, whose output barely moved with
+artist tags); s = 0.5 and s = 1 with a scene prompt are the same picture. The knob is unused because the
+prompt already tells the modes apart — artist tags were always present at s = 0 and never at s = 1 — so
+the model keys on the tags. Useful by-product: the step-1,000 checkpoint is a good "identity from the
+reference, style from the artist tags" adapter.
 
-## 4. Style adapter (planned)
+## 4. `char_v3` — knob with blend targets (stopped)
+
+To decouple the knob from the tags and to give it real intermediate targets, `blend1` renders each
+character C (2,300, one image each) with the artist weights of a reference combo A scaled by s and those of
+the prompt combo B by 1 − s, s ∈ {0.25, 0.5, 0.75} (`datagen/build_blend_manifest.py`; a 64-image check of
+two weight schemes showed proportional weights ×1.2 move the style steadily from B to A, while keeping
+both ≥ 0.5 made the middle levels look alike). Training modes (`train_char_v2.py --blend-prep`, config
+`train_char_v3.json`): identity 30% (s = 0), copy 15% (s = 1, no artist), conflict 20% (s = 1, prompt
+names B, target in A's style, built from existing images), blend 35% (prompt names B, target the blend).
+
+**Result (stopped at step 1,140).** At step 1,000 every knob metric was positive but ~10× smaller than the
+style signal itself: loss at s = 0 / s = 1 minus loss at the right s = 0.000024 / 0.000016; conflict
+targets at s = 1 vs s = 0: 0.000025 (style information is worth ~0.0006–0.0008). Images at s = 0, 0.5 and
+1 with the prompt naming B were the same picture, in B's style. The knob — a learned vector times s added
+to every reference token after patch embedding — was too weak a channel: its norm (0.61) is ~8% of a
+reference token's (7.5), while the per-frame timestep conditioning drives every block through adaLN
+(norm ~1,100). Together with the loss being insensitive to style, the model had little reason to use it.
+
+## Decision (2026-10-28): three separate adapters, multi-resolution
+
+One adapter with a mode switch kept failing because the modes' supervision mixed (v1, dual) or the switch
+was ignored (v2, v3). Instead, three adapters, each with one unambiguous task:
+
+1. **Character only** — identity from the reference, style from the prompt's artist tags. Reference = same
+   character by another artist; prompt names the target's artists; style-scrambling augmentation on the
+   reference. Trained first.
+2. **Character + style** — reference = another image of the same group, no artist tags (what `pilot_r32`
+   does; may be retrained on all data).
+3. **Style only** — reference = same artist, another character; prompt names the character. Needs a fix for
+   the loss's insensitivity to style (see below).
+
+Being LoRAs on the same base, they are expected to stack with other LoRAs the way the released adapter
+stacks with the Anima turbo LoRA. All three should cover **lower and somewhat higher resolutions** than the
+~1 MP training buckets (832×1216, 896×1152, 1024×1024, 1216×832): ~0.56 MP targets by downscaling
+existing images (re-encoded on the fly), ~1.27 MP targets rendered fresh (`hires1` run).
+
+The `blend1` data (2,300 blends) is kept for a later attempt at a continuous mix, e.g. a second LoRA whose
+output is scaled by s, so that s acts in every block.
+
+## 5. Style adapter (planned)
 
 Style ref = same artist, different character; prompt = everything except the artist; trained from scratch.
 Cause 2 remains: candidate fixes are selecting pairs whose styles differ clearly (style-embedding
