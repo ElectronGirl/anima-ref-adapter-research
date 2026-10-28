@@ -1,0 +1,86 @@
+{
+  "run_name": "pilot",
+  "groups": 600,
+  "images_per_group": 6,
+  "seed": 20261027,
+  "workers": 1,
+  "tag_taxonomy": "data/danbooru_tag_taxonomy.parquet",
+  "characters": {
+    "catalog": "data/danbooru_characters.csv",
+    "min_post_count": 1000,
+    "uses_per_character": 2,
+    "exclude_substrings": [
+      "swimsuit",
+      "bikini",
+      "bunny",
+      "lingerie",
+      "nude",
+      "naked",
+      "bath",
+      "underwear",
+      "maid bikini"
+    ],
+    "max_parenthesized_qualifiers": 1,
+    "identity_tags": "data/character_tags.jsonl",
+    "min_appearance_tags": 2
+  },
+  "artists": {
+    "catalog": "data/danbooru_artists_ge100.csv",
+    "min_post_count": 300,
+    "combo_size_weights": {
+      "1": 0.5,
+      "2": 0.35,
+      "3": 0.15
+    },
+    "mix_weight_range": [
+      0.7,
+      1.2
+    ],
+    "uses_per_combo": 2
+  },
+  "rating": {
+    "default": "safe",
+    "sensitive_ratio": 0.0,
+    "sensitive_allowlist": "data/adult_characters.txt"
+  },
+  "prompt": {
+    "quality": "masterpiece, best quality, score_7, newest, highres, absurdres",
+    "negative": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, chromatic aberration, bad anatomy, bad hands, extra arms, extra fingers, missing fingers, text, watermark, signature, artist name, multiple views, split screen, comic, 2koma, 4koma"
+  },
+  "comfy": {
+    "unet_name": "anima_baseV10.safetensors",
+    "clip_name": "qwen_3_06b_base.safetensors",
+    "vae_name": "qwenImageVAE_qwenImageVAE.safetensors",
+    "clip_type": "stable_diffusion"
+  },
+  "sampling": {
+    "steps": 24,
+    "cfg": 4.5,
+    "sampler_name": "er_sde",
+    "scheduler": "sgm_uniform"
+  },
+  "acceleration": {
+    "profile": "sage2_speed",
+    "batch_size": 16,
+    "sage_attention": {
+      "mode": "sageattn_qk_int8_pv_fp16_cuda",
+      "allow_compile": true
+    },
+    "speed": {
+      "base_sampler": "euler",
+      "transform": "dct",
+      "mode": "delta_optimal",
+      "model_preset": "flux",
+      "scales": "0.5,1.0",
+      "delta": 0.01,
+      "manual_sigmas": "0.85",
+      "spectrum_A": 203.615097,
+      "spectrum_beta": 1.915461
+    }
+  },
+  "output": {
+    "image_format": "webp",
+    "webp_quality": 95,
+    "save_latent": true
+  }
+}

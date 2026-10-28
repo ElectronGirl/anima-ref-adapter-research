@@ -1,0 +1,7 @@
+# On top of ComfyUI's requirements (train/anima_env.py imports ComfyUI's Anima modules).
+torch>=2.6
+safetensors
+numpy
+pillow
+huggingface_hub>=0.30
+pyarrow          # deploy/pack_dataset.py, datagen/build_character_tags.py

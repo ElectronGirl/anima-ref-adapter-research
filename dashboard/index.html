@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>학습 대시보드</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #e4e7ec;
+    --accent: #2f6fdb; --good: #1b8a5a; --bad: #c4411e;
+    --c1: #2f6fdb; --c2: #d9822b; --c3: #1b8a5a; --c4: #9b51e0; --c5: #c4411e; --c6: #6b7280;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12151b; --panel: #1a1e26; --text: #e6e8ec; --muted: #98a2b3; --line: #2a303b;
+      --accent: #6ea0ff; --good: #4cc38a; --bad: #ff7a59;
+      --c1: #6ea0ff; --c2: #f0a35e; --c3: #4cc38a; --c4: #c08bff; --c5: #ff7a59; --c6: #9aa3b2; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  h1 { font-size: 16px; margin: 0 8px 0 0; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tabs button { border: 1px solid var(--line); background: transparent; color: var(--text); padding: 4px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+  .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .status { color: var(--muted); font-size: 13px; margin-left: auto; }
+  .status b { color: var(--text); font-weight: 600; }
+  .pill { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+  .pill.running { color: var(--good); border-color: var(--good); }
+  .pill.stopped { color: var(--muted); }
+  main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+  .card h2 { font-size: 14px; margin: 0 0 2px; }
+  .card p.note { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+  .chart { position: relative; height: 260px; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
+  th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 600; }
+  .images { margin-top: 16px; }
+  .images select { font: inherit; padding: 3px 6px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; }
+  .rows img { width: 100%; height: auto; display: block; border-radius: 6px; margin-top: 10px; border: 1px solid var(--line); cursor: zoom-in; }
+  .empty { color: var(--muted); padding: 20px 0; }
+  .err { color: var(--bad); font-size: 12px; }
+  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } .status { margin-left: 0; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>학습 대시보드</h1>
+  <div class="tabs" id="tabs"></div>
+  <div class="status" id="status"></div>
+</header>
+<main>
+  <div class="grid">
+    <div class="card"><h2>Loss</h2><p class="note">10 step 평균(옅은 선)과 지수 평활(진한 선). 모드별 loss는 평활값.</p><div class="chart"><canvas id="loss"></canvas></div></div>
+    <div class="card" id="gapsCard"><h2>평가 loss 차이 (학습에 없던 그룹)</h2><p class="note">양수 = 레퍼런스가 도움. 점선은 출발점이던 dual LoRA 값. 정체성은 유지, 새어 들어감은 감소, 변수 효과는 증가가 목표.</p><div class="chart"><canvas id="gaps"></canvas></div></div>
+    <div class="card"><h2>강도 벡터 크기 · grad norm</h2><p class="note">강도 벡터(style embed) 노름이 커지면 변수가 쓰이고 있다는 뜻.</p><div class="chart"><canvas id="norms"></canvas></div></div>
+    <div class="card"><h2>학습률 · 속도</h2><p class="note">step당 초(오른쪽 축).</p><div class="chart"><canvas id="speed"></canvas></div></div>
+  </div>
+  <div class="card" style="margin-top:16px" id="tableCard"><h2>평가 표</h2><div id="table"></div></div>
+  <div class="card images">
+    <h2>평가 이미지 <select id="step"></select></h2>
+    <p class="note" id="imgNote"></p>
+    <div class="rows" id="rows"></div>
+  </div>
+</main>
+<script>
+const BASELINE = { identity_s0: 0.001974, leak_s0: 0.000257, copy_s0: 0.000595, copy_s1: 0.000595 };
+const GAP_LABELS = { identity_s0: "정체성 차이 (s=0)", leak_s0: "그림체 새어 들어감 (s=0)", copy_s0: "그림체 복사 (s=0)",
+                     copy_s1: "그림체 복사 (s=1)", knob: "변수 효과 (s1−s0)" };
+const IMAGE_NOTES = {
+  v2: "한 줄: 레퍼런스 | s=0 + 목표 작가 태그 | s=1 장면 프롬프트 | s=0.5 장면 프롬프트 | 생성기 목표",
+  dual: "한 줄: 캐릭터 레퍼런스 | 스타일 레퍼런스 | 두 슬롯 | 캐릭터 슬롯만 | 스타일 슬롯만 | 생성기 목표" };
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const palette = () => ["--c1", "--c2", "--c3", "--c4", "--c5", "--c6"].map(css);
+let data = null, current = localStorageGet("run"), charts = {}, shownStep = null;
+
+function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+function ema(values, alpha = 0.15) { let m = null; return values.map(v => v == null ? null : (m = m == null ? v : m + alpha * (v - m))); }
+function fmtTime(sec) { const d = new Date(sec * 1000); return d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }); }
+
+function chart(id, config) {
+  if (charts[id]) { charts[id].data = config.data; charts[id].options = config.options; charts[id].update("none"); return; }
+  charts[id] = new Chart(document.getElementById(id), config);
+}
+function baseOptions(extra = {}) {
+  const grid = { color: css("--line") }, ticks = { color: css("--muted") };
+  return Object.assign({ responsive: true, maintainAspectRatio: false, animation: false, parsing: false, normalized: true,
+    interaction: { mode: "nearest", axis: "x", intersect: false },
+    plugins: { legend: { labels: { color: css("--text"), boxWidth: 12 } } },
+    scales: { x: { type: "linear", title: { display: true, text: "step", color: css("--muted") }, grid, ticks },
+              y: { grid, ticks } } }, extra);
+}
+const pts = (rows, f) => rows.map(r => ({ x: r.step, y: f(r) })).filter(p => p.y != null && !Number.isNaN(p.y));
+
+function render() {
+  const runs = data.runs;
+  if (!runs.find(r => r.name === current)) current = runs[0]?.name;
+  document.getElementById("tabs").innerHTML = runs.map(r =>
+    `<button class="${r.name === current ? "on" : ""}" data-run="${r.name}">${r.name}</button>`).join("");
+  document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => { current = b.dataset.run; localStorageSet("run", current); shownStep = null; render(); });
+  const run = runs.find(r => r.name === current);
+  const log = run.log, last = log[log.length - 1];
+  const s = data.status;
+  const finished = last && run.steps && last.step >= run.steps && run.state !== "running";
+  const label = run.state === "running" ? "학습 중" : finished ? "완료" : run.state === "stopped" ? "멈춤" : "상태 모름";
+  let status = `<span class="pill ${run.state}">${label}</span> `;
+  if (last) {
+    status += `step <b>${last.step}</b>${run.steps ? " / " + run.steps : ""} · ${last.s_per_step}s/step`;
+    if (run.state === "running" && last.eta_h != null) {
+      const done = (s.last_sync || Date.now() / 1000) + last.eta_h * 3600;
+      status += ` · 남은 학습 ${last.eta_h.toFixed(2)}h (≈${fmtTime(done)}, 평가 시간 제외)`;
+    }
+  }
+  status += s.last_sync ? ` · 동기화 ${fmtTime(s.last_sync)}` : " · 동기화 중…";
+  if (s.error) status += `<div class="err">동기화 오류: ${s.error.replace(/</g, "&lt;")}</div>`;
+  document.getElementById("status").innerHTML = status;
+
+  const col = palette();
+  const modes = [...new Set(log.flatMap(r => Object.keys(r.mode_loss || {})))];
+  const lossSets = [
+    { label: "loss (10 step)", data: pts(log, r => r.loss), borderColor: col[5] + "55", borderWidth: 1, pointRadius: 0 },
+    { label: "loss (평활)", data: pts(log, r => r.loss).map((p, i, a) => ({ x: p.x, y: ema(a.map(q => q.y))[i] })), borderColor: col[5], borderWidth: 2, pointRadius: 0 },
+    ...modes.map((m, i) => {
+      const raw = pts(log, r => r.mode_loss?.[m]); const sm = ema(raw.map(p => p.y));
+      return { label: m, data: raw.map((p, j) => ({ x: p.x, y: sm[j] })), borderColor: col[i % 5], borderWidth: 1.5, pointRadius: 0 };
+    })];
+  chart("loss", { type: "line", data: { datasets: lossSets }, options: baseOptions() });
+
+  const evals = run.evals.filter(e => e.gaps);
+  document.getElementById("gapsCard").style.display = evals.length ? "" : "none";
+  document.getElementById("tableCard").style.display = evals.length ? "" : "none";
+  if (evals.length) {
+    const keys = Object.keys(GAP_LABELS);
+    const sets = keys.map((k, i) => ({ label: GAP_LABELS[k], data: evals.map(e => ({ x: e.eval_step, y: e.gaps[k] })),
+      borderColor: col[i], backgroundColor: col[i], pointRadius: 4, borderWidth: 2 }));
+    keys.filter(k => k in BASELINE && k !== "copy_s1").forEach(k => {
+      const i = keys.indexOf(k), xs = evals.map(e => e.eval_step), lo = Math.min(0, ...xs), hi = Math.max(...xs, run.steps || 0);
+      sets.push({ label: GAP_LABELS[k] + " · dual", data: [{ x: lo, y: BASELINE[k] }, { x: hi, y: BASELINE[k] }],
+        borderColor: col[i], borderDash: [5, 4], borderWidth: 1, pointRadius: 0 });
+    });
+    chart("gaps", { type: "line", data: { datasets: sets }, options: baseOptions({
+      plugins: { legend: { labels: { color: css("--text"), boxWidth: 12, filter: it => !it.text.endsWith("· dual") } } } }) });
+    const head = `<tr><th>step</th>${keys.map(k => `<th>${GAP_LABELS[k]}</th>`).join("")}</tr>`;
+    const base = `<tr><td>dual 출발점</td>${keys.map(k => `<td>${k in BASELINE ? BASELINE[k].toFixed(5) : "0"}</td>`).join("")}</tr>`;
+    const rows = evals.map(e => `<tr><td>${e.eval_step}</td>${keys.map(k => `<td>${e.gaps[k].toFixed(5)}</td>`).join("")}</tr>`).join("");
+    document.getElementById("table").innerHTML = `<table>${head}${base}${rows}</table>`;
+  }
+
+  const norms = [{ label: "grad norm", data: pts(log, r => r.grad_norm), borderColor: col[5] + "88", borderWidth: 1, pointRadius: 0, yAxisID: "y1" }];
+  if (log.some(r => r.embed_norm != null)) norms.unshift({ label: "강도 벡터 노름", data: pts(log, r => r.embed_norm), borderColor: col[3], borderWidth: 2, pointRadius: 0, yAxisID: "y" });
+  const o = baseOptions(); o.scales.y1 = { position: "right", grid: { drawOnChartArea: false }, ticks: { color: css("--muted") } };
+  chart("norms", { type: "line", data: { datasets: norms }, options: o });
+  const o2 = baseOptions(); o2.scales.y1 = { position: "right", grid: { drawOnChartArea: false }, ticks: { color: css("--muted") } };
+  chart("speed", { type: "line", data: { datasets: [
+    { label: "학습률", data: pts(log, r => r.lr), borderColor: col[0], borderWidth: 2, pointRadius: 0, yAxisID: "y" },
+    { label: "s/step", data: pts(log, r => r.s_per_step), borderColor: col[1], borderWidth: 1, pointRadius: 0, yAxisID: "y1" }] }, options: o2 });
+
+  const steps = Object.keys(run.samples).filter(k => run.samples[k].images.length);
+  const select = document.getElementById("step");
+  if (shownStep == null || !steps.includes(shownStep)) shownStep = steps[steps.length - 1] || null;
+  select.innerHTML = steps.map(k => `<option ${k === shownStep ? "selected" : ""}>${k}</option>`).join("");
+  select.onchange = () => { shownStep = select.value; renderImages(run); };
+  document.getElementById("imgNote").textContent = run.log.some(r => r.embed_norm != null) ? IMAGE_NOTES.v2 : IMAGE_NOTES.dual;
+  renderImages(run);
+}
+
+function renderImages(run) {
+  const box = document.getElementById("rows");
+  if (!shownStep) { box.innerHTML = `<div class="empty">아직 평가 이미지가 없습니다.</div>`; return; }
+  const imgs = run.samples[shownStep].images;
+  const key = run.name + shownStep + imgs.join();
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = imgs.map(n => { const u = `/files/${run.name}/samples/${shownStep}/${n}`;
+    return `<a href="${u}" target="_blank"><img loading="lazy" src="${u}" alt="${n}"></a>`; }).join("");
+}
+
+async function refresh() {
+  try { data = await (await fetch("/api/runs", { cache: "no-store" })).json(); render(); }
+  catch (e) { document.getElementById("status").innerHTML = `<span class="err">서버에 연결할 수 없습니다</span>`; }
+}
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
