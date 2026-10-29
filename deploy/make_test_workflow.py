@@ -52,7 +52,7 @@ NODES = [
      [("CONDITIONING", "CONDITIONING")], [750, 40], [420, 200]),
     (10, "CLIPTextEncode", "Negative", [NEGATIVE], {"clip": (2, 0, "CLIP")}, [("CONDITIONING", "CONDITIONING")],
      [750, 280], [420, 160]),
-    (11, "AnimaRefGuider", None, [4.5, 4.5, "apg", 0.5],
+    (11, "AnimaRefGuider", None, [4.5, 4.5, "apg", 0.5, 0.0, 1.0, "reference, no extra guidance"],
      {"model": (6, 0, "MODEL"), "positive": (9, 0, "CONDITIONING"), "negative": (10, 0, "CONDITIONING"),
       "ref_latent": (8, 0, "LATENT")}, [("GUIDER", "GUIDER")], [1210, 40], [320, 170]),
     (12, "KSamplerSelect", None, ["euler"], {}, [("SAMPLER", "SAMPLER")], [1210, 250], [320, 60]),
@@ -122,7 +122,7 @@ WIDGET_NAMES = {
     "AnimaRefAdapterLoader": ["lora_name", "strength", "ref_offset_h"], "ModelComputeDtype": ["dtype"],
     "PathchSageAttentionKJ": ["sage_attention", "allow_compile"], "LoadImage": ["image", None],
     "AnimaRefLatent": ["width", "height", "fill"], "CLIPTextEncode": ["text"],
-    "AnimaRefGuider": ["cfg", "ref_guidance", "correction", "rescale_phi"], "KSamplerSelect": ["sampler_name"],
+    "AnimaRefGuider": ["cfg", "ref_guidance", "correction", "rescale_phi", "ref_start", "ref_end", "outside"], "KSamplerSelect": ["sampler_name"],
     "BasicScheduler": ["scheduler", "steps", "denoise"], "RandomNoise": ["noise_seed", None],
     "SamplerCustomAdvanced": [], "VAEDecode": [], "SaveImage": ["filename_prefix"], "PreviewImage": [],
 }

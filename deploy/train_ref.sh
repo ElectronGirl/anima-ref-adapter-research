@@ -22,9 +22,9 @@ for pidfile in "runs/$RUN"/worker_gpu*.pid; do
     [[ -f "$pidfile" ]] || continue
     while kill -0 "$(cat "$pidfile")" 2>/dev/null; do sleep 60; done
 done
-for pidfile in "runs/$RUN"/comfy_gpu*/comfy.pid; do
-    [[ -f "$pidfile" ]] && kill "$(cat "$pidfile")" 2>/dev/null || true
-done
+# The worker reuses a ComfyUI already listening on its port, which may have been started by another
+# run (its pid file is then elsewhere): stop whatever serves the worker ports.
+pkill -f "[m]ain.py --listen 127.0.0.1 --port 819" || true
 echo "[train_ref $(date +%H:%M:%S)] generation of $RUN finished"
 sleep 5
 "$PYTHON_BIN" -u train/train_ref.py --task "$TASK" --prep "$BASE" --hires-run "$RUN" --hires-data "$DATA_ROOT/$RUN" \

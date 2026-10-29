@@ -152,6 +152,44 @@ Cause 2 remains: candidate fixes are selecting pairs whose styles differ clearly
 distance), a style loss on the predicted x0 (style-encoder features), or conditioning on a style-encoder
 embedding as extra tokens (IP-Adapter style) instead of a reference frame.
 
+## 6. `copy_asym_r64` — asymmetric attention (released as v2)
+
+Character + style task (reference = another image of the same group, no artist tags), trained with
+`train/train_ref.py --task copy` and `configs/train_copy_asym_r64.json` on the `dual_r32_prep` data
+(15,600 images: 2,300 characters, 1,952 artists, 6,600 groups).
+
+- **Asymmetric attention** (`anima_env.asym_forward`): reference tokens attend only to themselves and skip
+  cross-attention; target tokens attend to themselves and the reference. The reference stream is
+  independent of step, prompt and target, so the ComfyUI node computes its per-block keys and values once
+  per generation. One step at 832×1216 with CFG on an RTX PRO 6000: 0.28 s, against 0.58 s for the
+  two-frame pilot and 0.24 s without a reference.
+- Rank 64, batch 4, AdamW 1e-4; stopped at step 1,000 of 3,000 (about 1.1 h) when funding ran out.
+  A rank-32 run (`configs/train_copy_asym.json`) was trained for comparison.
+- Two characters work without training for it: two references side by side in one reference image and a
+  prompt that says who is on the left and who is on the right.
+
+## 7. `style_asym_r64` — style only (does not work)
+
+`--task style`, `configs/train_style_asym_r64.json`: reference = another character by the target's artists,
+prompt names the character. At step 1,000 the held-out loss gaps were tiny (`style_gap` 0.00023, `vs_base`
+0.00057, `same_group` 0.00009). On outside style references it does not copy the style: outputs move to
+the average look of the training data whatever the reference. Two causes, as in section 2: the flow-matching
+MSE is insensitive to style, and the data are Anima generations whose rendering of one artist tag varies.
+Better style data (or a style loss) should come before more training.
+
+## Inference notes (ComfyUI node)
+
+- **Anima Ref Adapter** (one node) runs the reference guidance as a post-CFG function: one extra model call
+  on the uncond branch without the reference, `guided = cfg_out + (rg - 1) * (uncond_ref - uncond_base)`,
+  then APG. It reproduces Anima Ref Guider's image with the stock KSampler and works with other samplers.
+- fp16 compute: the asymmetric forward must take the timestep embedding (which sets the compute dtype)
+  before moving the residual stream to fp32, as `MiniTrainDIT._forward` does; otherwise attention gets
+  fp32 queries and fp16 keys.
+- Tested to work with v2: SageAttention, EasyCache, a turbo LoRA (10 steps, cfg 1; the characters stay,
+  the reference style weakens), `ref_end` 0.6.
+
+**Status (2026-10-29): paused for lack of funding.**
+
 ## Engineering notes
 
 - `ThreadPoolExecutor.map` submits every job up front; with image loading faster than VAE encoding it

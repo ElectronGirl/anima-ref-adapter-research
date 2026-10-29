@@ -1,0 +1,65 @@
+{
+  "comfy": {
+    "unet_name": "anima_baseV10.safetensors",
+    "clip_name": "qwen_3_06b_base.safetensors",
+    "vae_name": "qwenImageVAE_qwenImageVAE.safetensors"
+  },
+  "data": {
+    "eval_characters": 12,
+    "eval_cases": 8,
+    "seen_eval_cases": 4,
+    "prompt_mix": {
+      "stripped": 0.7,
+      "partial": 0.2,
+      "minimal": 0.1
+    },
+    "partial_keep": [
+      0.3,
+      0.7
+    ],
+    "letterbox_fill": 255
+  },
+  "adapter": {
+    "lora_rank": 32,
+    "lora_alpha": 32,
+    "slots": {
+      "character": {
+        "t": 1,
+        "offset_h": 1.0,
+        "offset_w": 0
+      }
+    },
+    "ref_offset_jitter": 8,
+    "arch": "asym",
+    "ref_lora": true
+  },
+  "train": {
+    "steps": 3000,
+    "batch_size": 4,
+    "lr": 0.0001,
+    "warmup": 100,
+    "min_lr_ratio": 0.1,
+    "weight_decay": 0.0,
+    "grad_clip": 1.0,
+    "shift": 3.0,
+    "seed": 20261101,
+    "checkpoint_blocks": 16,
+    "log_every": 10,
+    "save_every": 500,
+    "sample_at": [
+      1000,
+      2000
+    ]
+  },
+  "sample": {
+    "steps": 30,
+    "cfg": 4.5
+  },
+  "task": {
+    "aug_prob": 0.0,
+    "res_mix": {
+      "base": 0.67,
+      "low": 0.33
+    }
+  }
+}

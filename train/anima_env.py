@@ -194,6 +194,133 @@ def ref_forward(dm, x: torch.Tensor, sigma: torch.Tensor, context: torch.Tensor,
     return dm.unpatchify(out)[:, :, :1]
 
 
+def _block_mods(block, emb_B_T_D: torch.Tensor, adaln_B_T_3D: torch.Tensor | None):
+    """(shift, scale, gate) [B, T, 1, 1, D] for self-attention, cross-attention and MLP (Block.forward)."""
+    out = []
+    for modulation in (block.adaln_modulation_self_attn, block.adaln_modulation_cross_attn, block.adaln_modulation_mlp):
+        m = modulation(emb_B_T_D) + adaln_B_T_3D if block.use_adaln_lora else modulation(emb_B_T_D)
+        out.append(tuple(t[:, :, None, None, :] for t in m.chunk(3, dim=-1)))
+    return out
+
+
+def _norm(x, layer_norm, scale, shift):
+    return layer_norm(x) * (1 + scale) + shift
+
+
+def asym_block(block, xt, xr, emb_t, emb_r, adaln_t, adaln_r, context, rope_t, rope_r, ref_kv=None, ref_hook=None):
+    """One Block.forward with asymmetric attention between a target stream and a reference stream.
+
+    Target tokens attend to target + reference tokens; reference tokens attend only to themselves and
+    skip cross-attention, so the reference stream does not depend on the target, sigma or the prompt
+    and its per-block keys/values can be computed once and reused (ref_kv). xt [B, 1, H, W, D] or None
+    (reference only); xr [B, 1, Hr, Wr, D] or None (then ref_kv must be given). ref_hook(enter: bool)
+    is called around the reference stream (e.g. to switch the LoRA off for it).
+    Returns (xt, xr, (k_r, v_r)).
+    """
+    attn = block.self_attn
+    k_r = v_r = None
+    if xr is not None:
+        if ref_hook:
+            ref_hook(True)
+        (sa, ca, mlp) = _block_mods(block, emb_r, adaln_r)
+        residual_dtype, compute_dtype = xr.dtype, emb_r.dtype
+        _, T, H, W, D = xr.shape
+        n = _norm(xr, block.layer_norm_self_attn, sa[1], sa[0]).to(compute_dtype).flatten(1, 3)
+        q_r, k_r, v_r = attn.compute_qkv(n, None, rope_emb=rope_r)
+        out = attn.compute_attention(q_r, k_r, v_r).reshape(xr.shape[0], T, H, W, -1)
+        xr = torch.addcmul(xr, sa[2].to(residual_dtype), out.to(residual_dtype))
+        n = _norm(xr, block.layer_norm_mlp, mlp[1], mlp[0]).to(compute_dtype)
+        xr = torch.addcmul(xr, mlp[2].to(residual_dtype), block.mlp(n).to(residual_dtype))
+        if ref_hook:
+            ref_hook(False)
+    elif ref_kv is not None:
+        k_r, v_r = ref_kv
+    if xt is not None:
+        (sa, ca, mlp) = _block_mods(block, emb_t, adaln_t)
+        residual_dtype, compute_dtype = xt.dtype, emb_t.dtype
+        B, T, H, W, D = xt.shape
+        n = _norm(xt, block.layer_norm_self_attn, sa[1], sa[0]).to(compute_dtype).flatten(1, 3)
+        q_t, k_t, v_t = attn.compute_qkv(n, None, rope_emb=rope_t)
+        if k_r is not None:
+            k_t, v_t = torch.cat([k_t, k_r.to(k_t)], dim=1), torch.cat([v_t, v_r.to(v_t)], dim=1)
+        out = attn.compute_attention(q_t, k_t, v_t).reshape(B, T, H, W, -1)
+        xt = torch.addcmul(xt, sa[2].to(residual_dtype), out.to(residual_dtype))
+        n = _norm(xt, block.layer_norm_cross_attn, ca[1], ca[0]).to(compute_dtype).flatten(1, 3)
+        out = block.cross_attn(n, context, rope_emb=None).reshape(B, T, H, W, -1)
+        xt = torch.addcmul(xt, ca[2].to(residual_dtype), out.to(residual_dtype))
+        n = _norm(xt, block.layer_norm_mlp, mlp[1], mlp[0]).to(compute_dtype)
+        xt = torch.addcmul(xt, mlp[2].to(residual_dtype), block.mlp(n).to(residual_dtype))
+    return xt, xr, (k_r, v_r)
+
+
+def _frame_embed(dm, latent: torch.Tensor, t_index: int, h0: int, w0: int, sigma: torch.Tensor):
+    """Patch embedding, RoPE and timestep embedding of one frame [B, C, 1, H, W]."""
+    x_emb, _, extra = dm.prepare_embedded_sequence(latent, fps=None, padding_mask=None)
+    if extra is not None:
+        raise NotImplementedError("extra per-block position embeddings are not supported")
+    _, _, hp, wp, _ = x_emb.shape
+    rope = rope_from_positions(dm.pos_embedder, *frame_positions(t_index, hp, wp, h0, w0, latent.device))
+    emb, adaln = dm.t_embedder[1](dm.t_embedder[0](sigma.reshape(-1, 1).float()).to(x_emb.dtype))
+    return x_emb, rope.unsqueeze(1).unsqueeze(0), dm.t_embedding_norm(emb), adaln
+
+
+def encode_ref_asym(dm, ref: torch.Tensor, ref_offset: tuple[int, int], ref_sigma: float = 0.0, ref_hook=None) -> list:
+    """Per-block reference keys/values for asym_forward(ref_kv=...): the reference stream run once."""
+    sigma = torch.full((ref.shape[0],), ref_sigma, device=ref.device)
+    xr, rope_r, emb_r, adaln_r = _frame_embed(dm, ref, 1, *ref_offset, sigma)
+    cache = []
+    for block in dm.blocks:
+        _, xr, kv = asym_block(block, None, xr, None, emb_r, None, adaln_r, None, None, rope_r, ref_hook=ref_hook)
+        cache.append(kv)
+    return cache
+
+
+def asym_forward(dm, x: torch.Tensor, sigma: torch.Tensor, context: torch.Tensor, ref: torch.Tensor | None = None,
+                 ref_offset: tuple[int, int] = (0, 0), ref_kv: list | None = None, ref_sigma: float = 0.0,
+                 checkpoint_blocks: int = 0, ref_hook=None) -> torch.Tensor:
+    """Velocity prediction for x [B, C, 1, H, W] with an asymmetric-attention reference.
+
+    The reference frame [B, C, 1, Hr, Wr] (any size) gets RoPE t index 1 shifted by ref_offset, timestep
+    ref_sigma, attends only to itself and skips cross-attention; the target attends to both. Pass ref
+    (computed alongside, for training) or ref_kv (encode_ref_asym, for sampling). Without either this is
+    the plain model forward.
+    """
+    xt, rope_t, emb_t, adaln_t = _frame_embed(dm, x, 0, 0, 0, sigma.to(x.device).reshape(-1))
+    xr = rope_r = emb_r = adaln_r = None
+    if ref is not None:
+        r_sigma = torch.full((ref.shape[0],), ref_sigma, device=ref.device)
+        xr, rope_r, emb_r, adaln_r = _frame_embed(dm, ref.to(x), 1, *ref_offset, r_sigma)
+    for i, block in enumerate(dm.blocks):
+        kv = ref_kv[i] if ref_kv is not None else None
+        args = (block, xt, xr, emb_t, emb_r, adaln_t, adaln_r, context, rope_t, rope_r, kv, ref_hook)
+        if i < checkpoint_blocks:
+            xt, xr, _ = torch.utils.checkpoint.checkpoint(asym_block, *args, use_reentrant=False)
+        else:
+            xt, xr, _ = asym_block(*args)
+    out = dm.final_layer(xt.to(context.dtype), emb_t, adaln_lora_B_T_3D=adaln_t)
+    return dm.unpatchify(out)[:, :, :1]
+
+
+@torch.inference_mode()
+def sample_euler_asym(dm, ctx_pos: torch.Tensor, ctx_neg: torch.Tensor, shape: tuple, seed: int, steps: int, cfg: float,
+                      shift: float, device, ref: torch.Tensor, ref_offset: tuple[int, int], ref_hook=None) -> torch.Tensor:
+    """sample_euler for the asymmetric reference: the reference's keys/values are computed once and shared
+    by every step and both CFG branches. ref [1, C, 1, Hr, Wr] (model space). Returns model-space x0."""
+    noise = torch.randn(shape, generator=torch.Generator(device="cpu").manual_seed(seed), dtype=torch.float32)
+    x = noise.to(device)
+    context = pad_contexts([ctx_pos, ctx_neg]).to(device, torch.bfloat16)
+    cache = encode_ref_asym(dm, ref.to(device, torch.bfloat16), ref_offset, ref_hook=ref_hook)
+    cache = [(k.expand(2, *k.shape[1:]), v.expand(2, *v.shape[1:])) for k, v in cache]
+    sigmas = flow_sigmas(steps, shift)
+    for i in range(steps):
+        sigma, sigma_next = float(sigmas[i]), float(sigmas[i + 1])
+        v = asym_forward(dm, x.to(torch.bfloat16).expand(2, *x.shape[1:]), torch.full((2,), sigma, device=device),
+                         context, ref_kv=cache).float()
+        v = v[1:2] + cfg * (v[0:1] - v[1:2])
+        x = x + (sigma_next - sigma) * v
+    return x
+
+
 def default_ref_offset(latent_height: int, cfg: dict, patch: int = 2) -> tuple[int, int]:
     hp = latent_height // patch
     return round(cfg.get("ref_offset_h", 1.0) * hp), int(cfg.get("ref_offset_w", 0))

@@ -29,9 +29,11 @@ prompt omits what the reference should supply (character, appearance, outfit, ar
 | `pilot_r32` | one reference → identity (+ some style) | released; 3,600 images, 2,000 steps |
 | `dual_r32` | character slot + style slot | trained (15,600 images, 4,000 steps); character slot better than pilot, **style slot does not work** |
 | `char_v2` / `char_v3` | one reference + `style_transfer` strength (0 = identity only, 1 = identity and style) | stopped: the strength was ignored |
-| character-only adapter | identity from the reference, style from artist tags; 0.56–1.27 MP | **next** |
-| character + style adapter | identity and style from the reference | `pilot_r32`; may be retrained |
-| style-only adapter | style only, from another character's image | planned |
+| `copy_asym_r64` | identity + style, asymmetric attention (cached reference), rank 64 | **released as v2**; 15,600 images, stopped at 1,000 of 3,000 steps |
+| `style_asym_r64` | style only, from another character's image | trained to 1,000 steps; **does not copy the reference style** |
+| character-only adapter | identity from the reference, style from artist tags; 0.56–1.27 MP | not started |
+
+**Development is paused for lack of funding (2026-10-29).**
 
 See [docs/experiments.md](docs/experiments.md) for the setups, held-out metrics, what went wrong with
 the style slot and why.
@@ -44,7 +46,8 @@ comfyui_nodes/   anima_ref_datagen_nodes (batched heterogeneous generation + asy
                  anima_ref_adapter_nodes (inference: loader, reference latent, guider; dev version)
 train/           anima_env.py   model plumbing: two-frame forward, offset RoPE, LoRA, sampler, self-test
                  prepare*.py    text contexts, target latents, letterboxed reference latents -> safetensors
-                 train*.py      pilot (single ref), dual (two slots), char_v2 (single ref + style knob)
+                 train*.py      pilot (single ref), dual (two slots), char_v2 (single ref + style knob),
+                                train_ref.py (multi-resolution; two-frame or asymmetric; copy / identity / style)
                  sample.py, eval_*.py, compare_adapters.py, try_refs.py   evaluation and probing
 configs/         datagen and training configs used for the runs above
 deploy/          setup and run scripts for a rented GPU box, dataset packing (Parquet), figures
@@ -83,6 +86,11 @@ deploy/train_dual.sh dual_r32 pilot grid1
 # 3. character adapter v2 with the style_transfer knob, on the same prepared tensors
 python train/train_char_v2.py --prep runs/train/dual_r32_prep --config configs/train_char_v2.json --out runs/train/char_v2
 python train/eval_char_v2.py --prep runs/train/dual_r32_prep --lora runs/train/char_v2/lora_step03000.safetensors --out runs/eval/char_v2
+
+# 4. v2: asymmetric attention, character + style (and the style-only variant with --task style)
+python train/train_ref.py --task copy --prep runs/train/dual_r32_prep --config configs/train_copy_asym_r64.json --out runs/train/copy_asym_r64
+python train/train_ref.py ... --resume runs/train/copy_asym_r64/state_step01000.pt   # continue a run
+python train/try_asym.py --lora runs/train/copy_asym_r64/lora_step01000.safetensors --prep runs/train/dual_r32_prep     --ref my_ref.png --size 832x1216 --prompt "1girl, solo, ..." --out runs/try/mine
 
 # probing
 python train/compare_adapters.py ...      # held-out loss per reference setup, two adapters side by side

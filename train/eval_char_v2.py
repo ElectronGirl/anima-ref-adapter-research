@@ -49,7 +49,8 @@ def loss_cases(index: dict, limit: int, seed: int = 0) -> list[dict]:
 
 
 @torch.inference_mode()
-def loss_gaps(dm, prep: Prep, refs: dict, targets: dict, embed: torch.Tensor, config: dict, device, limit: int = 60) -> dict:
+def loss_gaps(dm, prep: Prep, refs: dict, targets: dict, embed: torch.Tensor, config: dict, device, limit: int = 60,
+              forward=None) -> dict:
     """refs / targets: model-space latents keyed like the prep files."""
     adapter_cfg = config["adapter"]
     setups = {  # name -> (prompt variant, strength, case key of the reference)
@@ -76,9 +77,12 @@ def loss_gaps(dm, prep: Prep, refs: dict, targets: dict, embed: torch.Tensor, co
         for name, (prompt, strength, key) in setups.items():
             context = anima_env.pad_contexts([prep.context(record["prompts"][prompt])] * n).to(device, torch.bfloat16)
             ref = refs[f"{case[key]}@{width}x{height}"][None].to(device).expand(n, -1, -1, -1, -1)
-            frames = anima_env.slot_frames({"character": ref}, x0.shape[-2], adapter_cfg)
-            bias = (strength * embed.to(device)).reshape(1, -1).expand(n, -1)
-            pred = anima_env.ref_forward(dm, xt, sigma, context, refs=frames, ref_bias=bias).float()
+            if forward is not None:  # another reference architecture (train_ref.py --arch asym); strength unused
+                pred = forward(xt, sigma, context, ref).float()
+            else:
+                frames = anima_env.slot_frames({"character": ref}, x0.shape[-2], adapter_cfg)
+                bias = (strength * embed.to(device)).reshape(1, -1).expand(n, -1)
+                pred = anima_env.ref_forward(dm, xt, sigma, context, refs=frames, ref_bias=bias).float()
             losses[name].append(((pred - target_v) ** 2).mean().item())
     mean = {k: sum(v) / len(v) for k, v in losses.items()}
     gaps = {
