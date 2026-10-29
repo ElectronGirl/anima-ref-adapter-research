@@ -1,5 +1,7 @@
 # Anima Reference Adapter — research code
 
+**English** · [한국어](README.ko.md) · [日本語](README.ja.md)
+
 Training and evaluation code for reference adapters on [Anima](https://huggingface.co/circlestone-labs/Anima)
 (Cosmos-Predict2 MiniTrainDIT, 2B): give the model one reference image and it draws that character, and
 optionally that drawing style, in a new scene described by the prompt.
@@ -22,6 +24,11 @@ parameters) learns to read the frame. Training pairs are generated with Anima: t
 (fixed by exact Danbooru appearance/outfit tags) in different scenes and artist styles; the training
 prompt omits what the reference should supply (character, appearance, outfit, artist).
 
+v2 (`copy_asym_r64`) replaces the joint frame with asymmetric attention: reference tokens attend only to
+themselves and skip the text cross-attention, target tokens attend to themselves and the reference. At
+inference the reference's per-block keys and values are therefore computed once per image and cached
+(`asym_forward` in `train/anima_env.py`).
+
 ## Status
 
 | Adapter | What it does | State |
@@ -33,7 +40,7 @@ prompt omits what the reference should supply (character, appearance, outfit, ar
 | `style_asym_r64` | style only, from another character's image | trained to 1,000 steps; **does not copy the reference style** |
 | character-only adapter | identity from the reference, style from artist tags; 0.56–1.27 MP | not started |
 
-**Development is paused for lack of funding (2026-10-29).**
+**Development is paused for lack of funding (2026-10-29).** To support further training: [Ko-fi](https://ko-fi.com/electrongirl).
 
 See [docs/experiments.md](docs/experiments.md) for the setups, held-out metrics, what went wrong with
 the style slot and why.
@@ -90,7 +97,8 @@ python train/eval_char_v2.py --prep runs/train/dual_r32_prep --lora runs/train/c
 # 4. v2: asymmetric attention, character + style (and the style-only variant with --task style)
 python train/train_ref.py --task copy --prep runs/train/dual_r32_prep --config configs/train_copy_asym_r64.json --out runs/train/copy_asym_r64
 python train/train_ref.py ... --resume runs/train/copy_asym_r64/state_step01000.pt   # continue a run
-python train/try_asym.py --lora runs/train/copy_asym_r64/lora_step01000.safetensors --prep runs/train/dual_r32_prep     --ref my_ref.png --size 832x1216 --prompt "1girl, solo, ..." --out runs/try/mine
+python train/try_asym.py --lora runs/train/copy_asym_r64/lora_step01000.safetensors --prep runs/train/dual_r32_prep \
+    --ref my_ref.png --size 832x1216 --prompt "1girl, solo, ..." --out runs/try/mine
 
 # probing
 python train/compare_adapters.py ...      # held-out loss per reference setup, two adapters side by side
