@@ -10,7 +10,7 @@
 生成、テンソルの準備、学習、評価と分析のスクリプトがあり、失敗した実験や途中の実験とその数値は
 [docs/experiments.md](docs/experiments.md) にまとめています（英語）。
 
-- ComfyUI 推論ノード（配布版）: [ElectronGirl/ComfyUI-Anima-Ref-Adapter](https://github.com/ElectronGirl/ComfyUI-Anima-Ref-Adapter)
+- ComfyUI 推論ノード（配布版）: [ArcAnima/ComfyUI-Anima-Ref-Adapter](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter)
 - 公開している重みと技術レポート: [ElectronGirl/anima-ref-adapter](https://huggingface.co/ElectronGirl/anima-ref-adapter)
 
 ## 手法の概要

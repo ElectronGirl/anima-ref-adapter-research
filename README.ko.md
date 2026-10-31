@@ -10,7 +10,7 @@
 텐서 준비, 학습, 평가와 분석 스크립트가 있고, 실패했거나 진행 중이던 실험과 그 수치는
 [docs/experiments.md](docs/experiments.md)에 정리되어 있습니다(영어).
 
-- ComfyUI 추론 노드(배포판): [ElectronGirl/ComfyUI-Anima-Ref-Adapter](https://github.com/ElectronGirl/ComfyUI-Anima-Ref-Adapter)
+- ComfyUI 추론 노드(배포판): [ArcAnima/ComfyUI-Anima-Ref-Adapter](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter)
 - 공개 가중치와 기술 보고서: [ElectronGirl/anima-ref-adapter](https://huggingface.co/ElectronGirl/anima-ref-adapter)
 
 ## 방법 요약

@@ -10,7 +10,7 @@ This repository holds everything behind the released adapter and the experiments
 generation with Anima itself, tensor preparation, training, evaluation and analysis scripts, plus the
 failed and in-progress experiments with their numbers ([docs/experiments.md](docs/experiments.md)).
 
-- Inference nodes for ComfyUI (release): [ElectronGirl/ComfyUI-Anima-Ref-Adapter](https://github.com/ElectronGirl/ComfyUI-Anima-Ref-Adapter)
+- Inference nodes for ComfyUI (release): [ArcAnima/ComfyUI-Anima-Ref-Adapter](https://github.com/ArcAnima/ComfyUI-Anima-Ref-Adapter)
 - Released weights and technical report: [ElectronGirl/anima-ref-adapter](https://huggingface.co/ElectronGirl/anima-ref-adapter)
 
 ## Method in one paragraph
